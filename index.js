@@ -37,6 +37,7 @@ function mainMenu(chatId) {
 // ---------- Google Sheets ----------
 async function getProducts() {
   const url = `https://docs.google.com/spreadsheets/d/${process.env.GOOGLE_SHEET_ID}/gviz/tq?tqx=out:json`;
+
   const res = await axios.get(url);
   const json = JSON.parse(res.data.substring(47).slice(0, -2));
 
@@ -48,10 +49,10 @@ async function getProducts() {
   }));
 }
 
-// ---------- Smart Score (AI-like search) ----------
+// ---------- Smart Score ----------
 function scoreProduct(text, product) {
-  const t = text.toLowerCase();
-  const name = product.name.toLowerCase();
+  const t = (text || "").toLowerCase();
+  const name = (product?.name || "").toLowerCase();
 
   let score = 0;
 
@@ -60,7 +61,7 @@ function scoreProduct(text, product) {
   const words = t.split(" ");
   for (const w of words) {
     if (name.includes(w)) score += 2;
-    if (product.specs.toLowerCase().includes(w)) score += 1;
+    if ((product?.specs || "").toLowerCase().includes(w)) score += 1;
   }
 
   return score;
@@ -83,11 +84,7 @@ bot.onText(/\/admin/, async msg => {
 `🛠 پنل ادمین
 
 📦 تعداد محصولات: ${products.length}
-👤 آیدی شما: ${msg.from.id}
-
-📌 دستورات:
-- /start
-- /admin`
+👤 آیدی شما: ${msg.from.id}`
   );
 });
 
@@ -125,7 +122,6 @@ bot.on("message", async msg => {
 
     const products = await getProducts();
 
-    // ---------- Fuse (base search) ----------
     const fuse = new Fuse(products, {
       keys: ["name", "specs"],
       threshold: 0.5
@@ -133,7 +129,6 @@ bot.on("message", async msg => {
 
     let fuseResults = fuse.search(text).map(r => r.item);
 
-    // ---------- AI Smart Ranking ----------
     let results = fuseResults
       .map(p => ({
         item: p,
@@ -149,14 +144,14 @@ bot.on("message", async msg => {
 
 🔍 لطفاً:
 - کلمه ساده‌تر بنویس
-- یا نام محصول را دقیق‌تر وارد کن`
+- یا نام دقیق‌تر وارد کن`
       );
     }
 
     const best = results[0];
 
     // ---------- EXACT ----------
-    if (best.name.toLowerCase() === text.toLowerCase()) {
+    if (best?.name && best.name.toLowerCase() === text.toLowerCase()) {
       return sendProduct(chatId, best);
     }
 
@@ -165,7 +160,7 @@ bot.on("message", async msg => {
       return sendProduct(chatId, best);
     }
 
-    // ---------- MULTI (<=10) ----------
+    // ---------- MULTI ----------
     if (results.length <= 10) {
       return bot.sendMessage(chatId,
 `🔍 چند نتیجه پیدا شد:
@@ -193,22 +188,24 @@ bot.on("message", async msg => {
 
 // ---------- Send Product ----------
 function sendProduct(chatId, p) {
-  bot.sendMessage(chatId,
+  if (!p) return;
+
+  return bot.sendMessage(chatId,
 `🛒 ${p.name}
 
 💰 قیمت: ${p.price}
 📦 وضعیت: ${p.status}
 
 📝 مشخصات:
-${p.specs}`,
-{
-  reply_markup: {
-    inline_keyboard: [
-      [{ text: "🌐 جستجوی اینترنتی", callback_data: `deep_${p.name}` }],
-      [{ text: "🔙 منو", callback_data: "back" }]
-    ]
-  }
-});
+${p.specs || "-"}`,
+  {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "🌐 جستجوی اینترنتی", callback_data: `deep_${p.name}` }],
+        [{ text: "🔙 منو", callback_data: "back" }]
+      ]
+    }
+  });
 }
 
 // ---------- Callback ----------
