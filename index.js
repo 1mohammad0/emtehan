@@ -3,17 +3,22 @@ import express from "express";
 import axios from "axios";
 import Fuse from "fuse.js";
 import dotenv from "dotenv";
-import OpenAI from "openai";
 
 dotenv.config();
 
-// ---------- Config ----------
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 const app = express();
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 app.get("/", (req, res) => res.send("Bot is running"));
 app.listen(process.env.PORT || 3000);
+
+// ---------- Simple memory ----------
+const userStats = new Map();
+
+// ---------- Admin ----------
+function isAdmin(userId) {
+  return String(userId) === String(process.env.ADMIN_ID);
+}
 
 // ---------- Main Menu ----------
 function mainMenu(chatId) {
@@ -21,14 +26,15 @@ function mainMenu(chatId) {
     reply_markup: {
       keyboard: [
         ["🔍 جستجوی محصول"],
-        ["📞 ارتباط با ما", "📢 کانال اصلی", "📍 آدرس فروشگاه"]
+        ["📞 ارتباط با ما", "📢 کانال اصلی"],
+        ["📍 آدرس فروشگاه"]
       ],
       resize_keyboard: true
     }
   });
 }
 
-// ---------- Get Products ----------
+// ---------- Google Sheets ----------
 async function getProducts() {
   const url = `https://docs.google.com/spreadsheets/d/${process.env.GOOGLE_SHEET_ID}/gviz/tq?tqx=out:json`;
   const res = await axios.get(url);
@@ -42,58 +48,154 @@ async function getProducts() {
   }));
 }
 
+// ---------- Smart Score (AI-like search) ----------
+function scoreProduct(text, product) {
+  const t = text.toLowerCase();
+  const name = product.name.toLowerCase();
+
+  let score = 0;
+
+  if (name.includes(t)) score += 5;
+
+  const words = t.split(" ");
+  for (const w of words) {
+    if (name.includes(w)) score += 2;
+    if (product.specs.toLowerCase().includes(w)) score += 1;
+  }
+
+  return score;
+}
+
 // ---------- Start ----------
 bot.onText(/\/start/, msg => {
   mainMenu(msg.chat.id);
+});
+
+// ---------- Admin Panel ----------
+bot.onText(/\/admin/, async msg => {
+  if (!isAdmin(msg.from.id)) {
+    return bot.sendMessage(msg.chat.id, "⛔ دسترسی ندارید");
+  }
+
+  const products = await getProducts();
+
+  bot.sendMessage(msg.chat.id,
+`🛠 پنل ادمین
+
+📦 تعداد محصولات: ${products.length}
+👤 آیدی شما: ${msg.from.id}
+
+📌 دستورات:
+- /start
+- /admin`
+  );
 });
 
 // ---------- Message Handler ----------
 bot.on("message", async msg => {
   const chatId = msg.chat.id;
   const text = msg.text;
+
   if (!text || text.startsWith("/")) return;
 
-  if (text === "🔍 جستجوی محصول") {
-    return bot.sendMessage(chatId, "✍️ نام محصول را وارد کنید:");
-  }
+  userStats.set(chatId, (userStats.get(chatId) || 0) + 1);
 
-  if (text === "📞 ارتباط با ما") {
-    return bot.sendMessage(chatId,
+  try {
+    // ---------- MENU ----------
+    if (text === "🔍 جستجوی محصول") {
+      return bot.sendMessage(chatId, "✍️ نام یا توضیح محصول را بنویس:");
+    }
+
+    if (text === "📞 ارتباط با ما") {
+      return bot.sendMessage(chatId,
 `📞 ارتباط با ما
+
 💬 تلگرام: @m1348sh
-📱 09143531348`);
-  }
+📱 09143531348`
+      );
+    }
 
-  if (text === "📢 کانال اصلی") {
+    if (text === "📢 کانال اصلی") {
+      return bot.sendMessage(chatId, "https://t.me/tasisatyeshagi");
+    }
+
+    if (text === "📍 آدرس فروشگاه") {
+      return bot.sendLocation(chatId, 38.2598767, 48.3091167);
+    }
+
+    const products = await getProducts();
+
+    // ---------- Fuse (base search) ----------
+    const fuse = new Fuse(products, {
+      keys: ["name", "specs"],
+      threshold: 0.5
+    });
+
+    let fuseResults = fuse.search(text).map(r => r.item);
+
+    // ---------- AI Smart Ranking ----------
+    let results = fuseResults
+      .map(p => ({
+        item: p,
+        score: scoreProduct(text, p)
+      }))
+      .sort((a, b) => b.score - a.score)
+      .map(r => r.item)
+      .filter(Boolean);
+
+    if (!results.length) {
+      return bot.sendMessage(chatId,
+`❌ چیزی پیدا نشد
+
+🔍 لطفاً:
+- کلمه ساده‌تر بنویس
+- یا نام محصول را دقیق‌تر وارد کن`
+      );
+    }
+
+    const best = results[0];
+
+    // ---------- EXACT ----------
+    if (best.name.toLowerCase() === text.toLowerCase()) {
+      return sendProduct(chatId, best);
+    }
+
+    // ---------- SINGLE ----------
+    if (results.length === 1) {
+      return sendProduct(chatId, best);
+    }
+
+    // ---------- MULTI (<=10) ----------
+    if (results.length <= 10) {
+      return bot.sendMessage(chatId,
+`🔍 چند نتیجه پیدا شد:
+
+روی محصول کلیک کن 👇`,
+      {
+        reply_markup: {
+          inline_keyboard: results.map(p => ([{
+            text: p.name,
+            callback_data: `prod_${p.name}`
+          }]))
+        }
+      });
+    }
+
     return bot.sendMessage(chatId,
-`📢 کانال رسمی:
-https://t.me/tasisatyeshagi`);
+`🔍 تعداد نتایج زیاد است (${results.length})
+
+لطفاً دقیق‌تر بنویس`);
+  } catch (err) {
+    console.error(err);
+    bot.sendMessage(chatId, "❌ خطا در سرور");
   }
+});
 
-  if (text === "📍 آدرس فروشگاه") {
-    return bot.sendLocation(chatId, 38.2598767, 48.3091167);
-  }
+// ---------- Send Product ----------
+function sendProduct(chatId, p) {
+  bot.sendMessage(chatId,
+`🛒 ${p.name}
 
-  // ---------- Product Search ----------
-  const products = await getProducts();
-  const fuse = new Fuse(products, {
-    keys: ["name"],
-    threshold: 0.4
-  });
-
-  const results = fuse.search(text);
-
-  if (!results.length) {
-    return bot.sendMessage(chatId,
-`❌ محصولی پیدا نشد
-📩 ارتباط با ادمین: @m1348sh`);
-  }
-
-  for (let r of results) {
-    const p = r.item;
-
-    await bot.sendMessage(chatId,
-`🛒 نام کالا: ${p.name}
 💰 قیمت: ${p.price}
 📦 وضعیت: ${p.status}
 
@@ -102,77 +204,38 @@ ${p.specs}`,
 {
   reply_markup: {
     inline_keyboard: [
-      [{ text: "🌐 جستجوی عمیق اینترنتی", callback_data: `deep_${p.name}` }],
-      [{ text: "🔙 بازگشت به منو", callback_data: "back" }]
+      [{ text: "🌐 جستجوی اینترنتی", callback_data: `deep_${p.name}` }],
+      [{ text: "🔙 منو", callback_data: "back" }]
     ]
   }
 });
-  }
-});
+}
 
-// ---------- Deep Search + AI Summary ----------
+// ---------- Callback ----------
 bot.on("callback_query", async q => {
   const chatId = q.message.chat.id;
 
-  if (q.data === "back") return mainMenu(chatId);
+  if (q.data === "back") {
+    return mainMenu(chatId);
+  }
+
+  if (q.data.startsWith("prod_")) {
+    const name = q.data.replace("prod_", "");
+    const products = await getProducts();
+
+    const product = products.find(p => p.name === name);
+    if (product) return sendProduct(chatId, product);
+  }
 
   if (q.data.startsWith("deep_")) {
-    const productName = q.data.replace("deep_", "");
-    const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(productName)}`;
+    const query = q.data.replace("deep_", "");
+    const url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
 
-    let summary = "اطلاعاتی یافت نشد.";
+    return bot.sendMessage(chatId,
+`🌐 جستجوی اینترنتی
 
-    try {
-      // 1️⃣ گرفتن نتایج جستجو
-      const searchRes = await axios.get(searchUrl);
-      const html = searchRes.data;
-      const linkMatch = html.match(/<a rel="nofollow" class="result__a" href="(.*?)">/);
+🔍 ${query}
 
-      if (linkMatch && linkMatch[1]) {
-        const firstLink = linkMatch[1];
-
-        // 2️⃣ گرفتن متن صفحه
-        const pageRes = await axios.get(firstLink);
-        let pageText = pageRes.data;
-
-        pageText = pageText.replace(/<script[\s\S]*?<\/script>/gi, "");
-        pageText = pageText.replace(/<style[\s\S]*?<\/style>/gi, "");
-        pageText = pageText.replace(/<[^>]+>/g, "");
-        pageText = pageText.replace(/\s+/g, " ").substring(0, 3500);
-
-        // 3️⃣ خلاصه‌سازی با gpt-4o-mini (اقتصادی)
-        const aiResponse = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
-          temperature: 0.4,
-          max_tokens: 220,
-          messages: [
-            {
-              role: "system",
-              content: "تو یک کارشناس فروش تجهیزات تاسیساتی هستی و باید معرفی رسمی و خلاصه از محصول بنویسی."
-            },
-            {
-              role: "user",
-              content: `این متن درباره ${productName} است. در 4 جمله رسمی و دقیق خلاصه کن:\n\n${pageText}`
-            }
-          ]
-        });
-
-        summary = aiResponse.choices[0].message.content;
-      }
-
-    } catch (err) {
-      summary = "امکان دریافت اطلاعات از اینترنت وجود ندارد.";
-    }
-
-    bot.sendMessage(chatId,
-`🌐 جستجوی عمیق اینترنتی
-
-🔍 محصول: ${productName}
-
-📝 معرفی محصول:
-${summary}
-
-🔗 لینک سرچ:
-https://duckduckgo.com/?q=${encodeURIComponent(productName)}`);
+${url}`);
   }
 });
