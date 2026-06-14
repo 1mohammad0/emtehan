@@ -15,7 +15,7 @@ app.listen(process.env.PORT || 3000);
 // ---------- Memory ----------
 const userStats = new Map();
 
-// ---------- Multi Admin ----------
+// ---------- Admin ----------
 function isAdmin(userId) {
   const admins = (process.env.ADMIN_IDS || "")
     .split(",")
@@ -39,24 +39,43 @@ function mainMenu(chatId) {
   });
 }
 
-// ---------- Google Sheets ----------
+// ---------- Safe Google Sheets ----------
 async function getProducts() {
-  const url = `https://docs.google.com/spreadsheets/d/${process.env.GOOGLE_SHEET_ID}/gviz/tq?tqx=out:json`;
-  const res = await axios.get(url);
-  const json = JSON.parse(res.data.substring(47).slice(0, -2));
+  try {
+    const url = `https://docs.google.com/spreadsheets/d/${process.env.GOOGLE_SHEET_ID}/gviz/tq?tqx=out:json`;
+    const res = await axios.get(url, { timeout: 10000 });
 
-  return json.table.rows.map(r => ({
-    name: r.c[0]?.v || "",
-    price: r.c[1]?.v || "",
-    specs: r.c[2]?.v || "",
-    status: r.c[3]?.v || "نامشخص"
-  }));
+    const text = res.data;
+
+    if (!text || typeof text !== "string") return [];
+
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+
+    if (start === -1 || end === -1) return [];
+
+    const json = JSON.parse(text.substring(start, end + 1));
+
+    if (!json?.table?.rows) return [];
+
+    return json.table.rows.map(r => ({
+      name: r.c?.[0]?.v || "",
+      price: r.c?.[1]?.v || "",
+      specs: r.c?.[2]?.v || "",
+      status: r.c?.[3]?.v || "نامشخص"
+    }));
+
+  } catch (err) {
+    console.error("Sheet error:", err.message);
+    return [];
+  }
 }
 
 // ---------- Smart Score ----------
 function scoreProduct(text, product) {
   const t = (text || "").toLowerCase();
   const name = (product?.name || "").toLowerCase();
+  const specs = (product?.specs || "").toLowerCase();
 
   let score = 0;
 
@@ -64,8 +83,9 @@ function scoreProduct(text, product) {
 
   const words = t.split(" ");
   for (const w of words) {
+    if (!w) continue;
     if (name.includes(w)) score += 2;
-    if ((product?.specs || "").toLowerCase().includes(w)) score += 1;
+    if (specs.includes(w)) score += 1;
   }
 
   return score;
@@ -76,7 +96,7 @@ bot.onText(/\/start/, msg => {
   mainMenu(msg.chat.id);
 });
 
-// ---------- Admin Panel ----------
+// ---------- Admin ----------
 bot.onText(/\/admin/, async msg => {
   if (!isAdmin(msg.from.id)) {
     return bot.sendMessage(msg.chat.id, "⛔ دسترسی ندارید");
@@ -84,14 +104,14 @@ bot.onText(/\/admin/, async msg => {
 
   const products = await getProducts();
 
-  bot.sendMessage(msg.chat.id,
+  return bot.sendMessage(msg.chat.id,
 `🛠 پنل ادمین
 
 📦 تعداد محصولات: ${products.length}
 👤 آیدی شما: ${msg.from.id}`);
 });
 
-// ---------- Messages ----------
+// ---------- Message Handler ----------
 bot.on("message", async msg => {
   const chatId = msg.chat.id;
   const text = msg.text;
@@ -125,6 +145,10 @@ bot.on("message", async msg => {
 
     const products = await getProducts();
 
+    if (!products.length) {
+      return bot.sendMessage(chatId, "❌ خطا در دریافت محصولات");
+    }
+
     const fuse = new Fuse(products, {
       keys: ["name", "specs"],
       threshold: 0.5
@@ -138,14 +162,13 @@ bot.on("message", async msg => {
         score: scoreProduct(text, p)
       }))
       .sort((a, b) => b.score - a.score)
-      .map(r => r.item)
-      .filter(Boolean);
+      .map(r => r.item);
 
     if (!results.length) {
       return bot.sendMessage(chatId,
 `❌ چیزی پیدا نشد
 
-🔍 لطفاً دقیق‌تر بنویس`);
+🔍 دقیق‌تر بنویس`);
     }
 
     const best = results[0];
@@ -177,12 +200,12 @@ bot.on("message", async msg => {
     }
 
     return bot.sendMessage(chatId,
-`🔍 تعداد نتایج زیاد است (${results.length})
+`🔍 نتایج زیاد است (${results.length})
 
 لطفاً دقیق‌تر بنویس`);
   } catch (err) {
     console.error(err);
-    bot.sendMessage(chatId, "❌ خطا در سرور");
+    return bot.sendMessage(chatId, "❌ خطا در پردازش درخواست");
   }
 });
 
@@ -212,27 +235,32 @@ ${p.specs || "-"}`,
 bot.on("callback_query", async q => {
   const chatId = q.message.chat.id;
 
-  if (q.data === "back") {
-    return mainMenu(chatId);
-  }
+  try {
+    if (q.data === "back") {
+      return mainMenu(chatId);
+    }
 
-  if (q.data.startsWith("prod_")) {
-    const name = q.data.replace("prod_", "");
-    const products = await getProducts();
+    if (q.data.startsWith("prod_")) {
+      const name = q.data.replace("prod_", "");
+      const products = await getProducts();
 
-    const product = products.find(p => p.name === name);
-    if (product) return sendProduct(chatId, product);
-  }
+      const product = products.find(p => p.name === name);
+      if (product) return sendProduct(chatId, product);
+    }
 
-  if (q.data.startsWith("deep_")) {
-    const query = q.data.replace("deep_", "");
-    const url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+    if (q.data.startsWith("deep_")) {
+      const query = q.data.replace("deep_", "");
+      const url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
 
-    return bot.sendMessage(chatId,
+      return bot.sendMessage(chatId,
 `🌐 جستجوی اینترنتی
 
 🔍 ${query}
 
 ${url}`);
+    }
+  } catch (err) {
+    console.error(err);
+    return bot.sendMessage(chatId, "❌ خطا در عملیات");
   }
 });
