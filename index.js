@@ -12,12 +12,17 @@ const app = express();
 app.get("/", (req, res) => res.send("Bot is running"));
 app.listen(process.env.PORT || 3000);
 
-// ---------- Simple memory ----------
+// ---------- Memory ----------
 const userStats = new Map();
 
-// ---------- Admin ----------
+// ---------- Multi Admin ----------
 function isAdmin(userId) {
-  return String(userId) === String(process.env.ADMIN_ID);
+  const admins = (process.env.ADMIN_IDS || "")
+    .split(",")
+    .map(id => id.trim())
+    .filter(Boolean);
+
+  return admins.includes(String(userId));
 }
 
 // ---------- Main Menu ----------
@@ -37,7 +42,6 @@ function mainMenu(chatId) {
 // ---------- Google Sheets ----------
 async function getProducts() {
   const url = `https://docs.google.com/spreadsheets/d/${process.env.GOOGLE_SHEET_ID}/gviz/tq?tqx=out:json`;
-
   const res = await axios.get(url);
   const json = JSON.parse(res.data.substring(47).slice(0, -2));
 
@@ -84,11 +88,10 @@ bot.onText(/\/admin/, async msg => {
 `🛠 پنل ادمین
 
 📦 تعداد محصولات: ${products.length}
-👤 آیدی شما: ${msg.from.id}`
-  );
+👤 آیدی شما: ${msg.from.id}`);
 });
 
-// ---------- Message Handler ----------
+// ---------- Messages ----------
 bot.on("message", async msg => {
   const chatId = msg.chat.id;
   const text = msg.text;
@@ -142,10 +145,7 @@ bot.on("message", async msg => {
       return bot.sendMessage(chatId,
 `❌ چیزی پیدا نشد
 
-🔍 لطفاً:
-- کلمه ساده‌تر بنویس
-- یا نام دقیق‌تر وارد کن`
-      );
+🔍 لطفاً دقیق‌تر بنویس`);
     }
 
     const best = results[0];
